@@ -264,8 +264,8 @@ class PolarBleWorker:
                 self.status = "connected"
 
                 # Aguarda brevemente para o BlueZ resolver a tabela GATT
-                await asyncio.sleep(0.5)
-                await self._read_battery(client)
+                # await asyncio.sleep(0.5)
+                # await self._read_battery(client)
 
                 self.reconnect_attempts = 0
                 connected_event.set()
