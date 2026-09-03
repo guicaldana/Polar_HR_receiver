@@ -8,20 +8,24 @@ Serviço de backend em Python para captura de frequência cardíaca da fita **Po
 
 ```
 Polar_HR_receiver/
-├── main.py              # API FastAPI e endpoint WebSocket (/ws/hr)
-├── polar_worker.py      # Worker BLE com Bleak, decodificador GATT e reconexão
-├── test_client.py       # Script CLI para testar o WebSocket no terminal
-├── requirements.txt     # Dependências Python
-└── README.md            # Documentação de uso
+├── main.py                     # API FastAPI e endpoint WebSocket (/ws/hr)
+├── polar_worker.py             # Worker BLE com Bleak, decodificador GATT e reconexão
+├── test_client.py              # Script CLI para testar o WebSocket no terminal
+├── requirements.txt            # Dependências Python
+├── RELATORIO_IMPLEMENTACAO.md  # Relatório técnico completo de arquitetura e código
+├── README.md                   # Documentação do projeto
+└── .gitignore                  # Regras de exclusão Git
 ```
 
 ---
 
 ## 🚀 Instalação e Execução
 
-### 1. Criar ambiente virtual e instalar dependências
+### 1. Clonar o repositório e criar o ambiente virtual
 ```bash
-cd /home/guicaldana/UFES/HCS/Polar_HR_receiver
+git clone git@github.com:guicaldana/Polar_HR_receiver.git
+cd Polar_HR_receiver
+
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -30,14 +34,17 @@ pip install -r requirements.txt
 ### 2. Iniciar a API com a fita Polar H10 real
 Certifique-se de que a fita esteja com os eletrodos umedecidos e posicionada no peito:
 ```bash
+source venv/bin/activate
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 3. Modo Simulação (Mock) — Sem precisar da fita física
-Ideal para desenvolver a interface no Next.js quando a fita estiver desligada ou descarregada:
+Ideal para desenvolver a interface no Next.js quando a fita estiver desligada, sem bateria ou sem receptor Bluetooth no computador de desenvolvimento:
 ```bash
+source venv/bin/activate
 MOCK_POLAR=true uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+> **Nota:** Em modo mock (`MOCK_POLAR=true`), o servidor roda mesmo sem a biblioteca `bleak` ou adaptadores Bluetooth disponíveis.
 
 ---
 
@@ -45,17 +52,18 @@ MOCK_POLAR=true uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 Em outro terminal (com o ambiente virtual ativo):
 ```bash
+source venv/bin/activate
 python test_client.py
 ```
-Você verá os dados de frequência cardíaca (BPM) e intervalos RR chegando ao vivo no console.
+Você verá os dados de frequência cardíaca (BPM), nível de bateria e intervalos RR chegando ao vivo no console.
 
 ---
 
 ## 🌐 Endpoints da API
 
-- **`GET /`**: Informações gerais da API e estado do dispositivo.
+- **`GET /`**: Informações gerais da API, modo de execução e estado da fita.
 - **`GET /health`**: Status detalhado da conexão, nível de bateria e número de clientes conectados.
-- **`WS /ws/hr`**: Canal WebSocket para streaming em tempo real.
+- **`WS /ws/hr`**: Canal WebSocket para streaming bidirecional em tempo real.
 
 ---
 
@@ -100,6 +108,6 @@ ws.onmessage = (event) => {
   }
 };
 ```
-Consulte o relatório completo de integração com componentes React e hooks em:  
-`~/.gemini/antigravity/brain/3d63c2e2-5dab-4086-9001-e7fd576ef9e4/relatorio_implementacao_fastapi_websockets.md`
 
+Para exemplos completos de integração com hooks customizados (`usePolarHeartRate`), gráficos temporais e componentes React, consulte o documento:
+- [`RELATORIO_IMPLEMENTACAO.md`](RELATORIO_IMPLEMENTACAO.md)
