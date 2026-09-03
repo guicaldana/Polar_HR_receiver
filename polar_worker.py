@@ -63,6 +63,7 @@ class PolarBleWorker:
 
     def __init__(self, broadcast_callback: Callable[[dict], asyncio.Future]):
         self.broadcast_callback = broadcast_callback
+        self.reconnect_attempts = 0
         self.client: Optional[Any] = None
         self.is_running = False
         self.user_requested_disconnect = False
@@ -266,6 +267,7 @@ class PolarBleWorker:
                 await asyncio.sleep(0.5)
                 await self._read_battery(client)
 
+                self.reconnect_attempts = 0
                 connected_event.set()
 
                 await self.broadcast_callback({
@@ -308,14 +310,24 @@ class PolarBleWorker:
             })
 
     async def _auto_reconnect(self, device: Any):
-        """Tenta restabelecer a conexão após queda involuntária."""
-        await asyncio.sleep(3.0)
+        """Tenta restabelecer a conexão após queda involuntária com backoff exponencial."""
+        self.reconnect_attempts += 1
+        
+        # Limita o atraso máximo a 60 segundos
+        delay = min(60.0, 3.0 * (1.5 ** (self.reconnect_attempts - 1)))
+        print(f"Tentando reconectar automaticamente em {delay:.1f} segundos (Tentativa {self.reconnect_attempts})...")
+        
+        await asyncio.sleep(delay)
+        
         if not self.user_requested_disconnect and self.is_running:
             try:
                 print(f"Reconectando a {self.device_name}...")
                 await self.connect_to_device(device.address)
+                # Se conectou com sucesso, _manage_connection reseta reconnect_attempts
             except Exception as e:
                 print(f"Falha na reconexão automática: {e}")
+                # Agenda nova tentativa se falhou
+                asyncio.create_task(self._auto_reconnect(device))
 
     async def disconnect(self) -> dict:
         """Desconecta a fita e libera o adaptador Bluetooth do sistema."""
