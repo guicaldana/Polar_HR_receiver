@@ -115,3 +115,30 @@ ws.onmessage = (event) => {
 
 Para exemplos completos de integração com hooks customizados (`usePolarHeartRate`), gráficos temporais e componentes React, consulte o documento:
 - [`RELATORIO_IMPLEMENTACAO.md`](RELATORIO_IMPLEMENTACAO.md)
+
+---
+
+## 🛠 Troubleshooting: Lidando com Instabilidades do Bluetooth (Linux / BlueZ)
+
+A conexão BLE no Linux pode sofrer com travamentos e loops de desconexão. Abaixo estão as resoluções para os cenários mais comuns (Especialmente com cintas Polar H10):
+
+### 1. Desconexões constantes com menos de 20 segundos
+**Causa:** A cinta Polar H10 desliga o próprio hardware de transmissão Bluetooth automaticamente para economizar bateria se os sensores não estiverem captando batimentos cardíacos.\n**Solução:**
+- Vista a fita no peito.
+- **Umedeça bem os eletrodos de borracha** para garantir a condutividade.
+- Sem estar no peito, ela nunca ficará estável!
+
+### 2. Erro: `failed to discover services, device disconnected`
+**Causa:** Conexão "Fantasma" (Ghost Connection) no BlueZ. Ao reiniciar a API abruptamente (CTRL+C), o Linux (BlueZ) não envia o encerramento da conexão, mantendo a fita conectada em background. Como a Polar só aceita 1 conexão, a nova tentativa de conexão é bloqueada. Outra causa pode ser a corrupção do cache GATT no Linux.
+**Solução:**
+- Desligue e ligue o Bluetooth nas configurações do seu SO.
+- **Ou** pelo terminal: `bluetoothctl disconnect <MAC_ADDRESS>` (ex: `bluetoothctl disconnect 24:AC:AC:16:68:08`).
+- Sempre prefira desconectar através do endpoint `/devices/disconnect` antes de derrubar o servidor.
+
+### 3. Fita conecta, envia apenas 1 dado (BPM) e desconecta
+**Causa:** Restrição de Segurança do firmware da Polar. A fita se recusa a transmitir dados contínuos para um host não pareado e derruba a conexão caso não receba a chave de criptografia de *Bonding*.
+**Solução:**
+Você precisa parear (Trust & Pair) o dispositivo de forma definitiva pelo nível do sistema:
+1. Abra o terminal e limpe o cache antigo: `bluetoothctl remove 24:AC:AC:16:68:08`
+2. Pareie com confiança profunda: `bluetoothctl pair 24:AC:AC:16:68:08`
+3. Após receber a mensagem `Pairing successful`, sua leitura na API será 100% estável.
