@@ -3,7 +3,7 @@ import os
 import random
 import struct
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional
 
 try:
     from bleak import BleakScanner, BleakClient
@@ -54,52 +54,295 @@ def parse_heart_rate_data(data: bytearray) -> dict:
 
 class PolarBleWorker:
     """
-    Gerencia a busca, conexão e assinatura de notificações BLE da fita Polar H10.
-    Suporta modo de simulação (mock) via variável de ambiente MOCK_POLAR=true.
+    Gerencia o ciclo de vida BLE da fita Polar H10:
+    - Escaneamento sob demanda (descoberta de dispositivos BLE).
+    - Conexão e desconexão explícitas via API REST / WebSocket.
+    - Streaming de dados e leitura de bateria.
+    - Modo de simulação (mock) para desenvolvimento sem hardware.
     """
 
     def __init__(self, broadcast_callback: Callable[[dict], asyncio.Future]):
         self.broadcast_callback = broadcast_callback
         self.client: Optional[Any] = None
         self.is_running = False
+        self.user_requested_disconnect = False
+        self.status = "disconnected"  # "disconnected" | "scanning" | "connecting" | "connected" | "error"
         self.device_name: Optional[str] = None
         self.device_address: Optional[str] = None
         self.battery_level: Optional[int] = None
+
         self.mock_mode = os.getenv("MOCK_POLAR", "false").lower() in ("true", "1", "yes")
+        self.auto_reconnect = os.getenv("AUTO_RECONNECT", "true").lower() in ("true", "1", "yes")
 
-    async def start(self):
-        self.is_running = True
+        self._mock_task: Optional[asyncio.Task] = None
+        self._connection_task: Optional[asyncio.Task] = None
+
+    def get_status(self) -> dict:
+        """Retorna o estado completo da conexão e do dispositivo."""
+        is_conn = False
         if self.mock_mode:
-            print("⚠️ MOCK_POLAR ativado: simulando dados de frequência cardíaca...")
-            asyncio.create_task(self._mock_loop())
-        else:
-            asyncio.create_task(self._connection_loop())
+            is_conn = (self.status == "connected")
+        elif self.client:
+            is_conn = getattr(self.client, "is_connected", False)
 
-    async def stop(self):
-        self.is_running = False
-        if self.client and self.client.is_connected:
+        return {
+            "status": self.status,
+            "is_connected": is_conn,
+            "device_name": self.device_name,
+            "device_address": self.device_address,
+            "battery_level": self.battery_level,
+            "mock_mode": self.mock_mode,
+            "auto_reconnect": self.auto_reconnect,
+        }
+
+    async def scan_devices(self, timeout: float = 4.0) -> List[dict]:
+        """
+        Escaneia dispositivos BLE próximos.
+        Retorna uma lista ordenada com os dispositivos Polar no topo.
+        """
+        if self.mock_mode:
+            await asyncio.sleep(1.0)
+            return [
+                {"name": "Polar H10 16680834 (Mock)", "address": "24:AC:AC:16:68:08", "rssi": -48, "is_polar": True},
+                {"name": "Polar Verity Sense (Mock)", "address": "A0:9E:1A:12:34:56", "rssi": -65, "is_polar": True},
+                {"name": "Dispositivo BLE Genérico", "address": "F1:22:33:44:55:66", "rssi": -82, "is_polar": False},
+            ]
+
+        if not HAS_BLEAK:
+            raise RuntimeError("Biblioteca 'bleak' não instalada. Ative o venv ou execute com MOCK_POLAR=true.")
+
+        previous_status = self.status
+        self.status = "scanning"
+        await self.broadcast_callback({
+            "type": "status",
+            "status": "scanning",
+            "message": "Escaneando dispositivos Bluetooth Low Energy...",
+        })
+
+        try:
+            discovered = await BleakScanner.discover(timeout=timeout, return_adv=True)
+            results = []
+            for d, adv in discovered.values():
+                name = d.name or adv.local_name or "Desconhecido"
+                is_polar = "polar" in name.lower()
+                results.append({
+                    "name": name,
+                    "address": d.address,
+                    "rssi": adv.rssi if adv else -99,
+                    "is_polar": is_polar,
+                })
+
+            # Ordena: fita Polar primeiro, depois por sinal mais forte
+            results.sort(key=lambda x: (not x["is_polar"], -x["rssi"]))
+            return results
+
+        finally:
+            self.status = previous_status
+
+    async def connect_to_device(self, address: Optional[str] = None) -> dict:
+        """
+        Conecta a um dispositivo específico pelo endereço MAC (ou busca Polar automaticamente).
+        """
+        self.user_requested_disconnect = False
+
+        # Se já estiver conectado ao mesmo dispositivo, apenas retorna sucesso
+        if self.client and getattr(self.client, "is_connected", False) and self.device_address == address:
+            return {"status": "connected", "message": f"Já conectado a {self.device_name}.", "device": self.device_name}
+
+        # Desconecta de conexão anterior se houver
+        if self.status == "connected":
+            await self.disconnect()
+
+        if self.mock_mode:
+            self.is_running = True
+            self.status = "connected"
+            self.device_name = "Polar H10 16680834 (Mock)"
+            self.device_address = address or "24:AC:AC:16:68:08"
+            self.battery_level = 100
+
+            if self._mock_task and not self._mock_task.done():
+                self._mock_task.cancel()
+            self._mock_task = asyncio.create_task(self._mock_loop())
+
+            await self.broadcast_callback({
+                "type": "status",
+                "status": "connected",
+                "device": self.device_name,
+                "address": self.device_address,
+                "battery": self.battery_level,
+                "mock": True,
+                "message": "Polar conectado com sucesso (Modo Mock)! Transmitindo dados.",
+            })
+            return {"status": "connected", "device": self.device_name, "address": self.device_address}
+
+        if not HAS_BLEAK:
+            raise RuntimeError("Biblioteca 'bleak' não instalada.")
+
+        self.status = "connecting"
+        await self.broadcast_callback({
+            "type": "status",
+            "status": "connecting",
+            "address": address,
+            "message": f"Conectando ao dispositivo {address or 'Polar H10'}...",
+        })
+
+        # Localiza o objeto BLEDevice
+        device = None
+        if address:
+            device = await BleakScanner.find_device_by_filter(
+                lambda d, adv: d.address.upper() == address.upper(),
+                timeout=6.0,
+            )
+        else:
+            device = await BleakScanner.find_device_by_filter(
+                lambda d, adv: d.name and ("polar" in d.name.lower()),
+                timeout=6.0,
+            )
+
+        if not device:
+            self.status = "disconnected"
+            err_msg = f"Dispositivo {address or 'Polar'} não encontrado ou fora de alcance."
+            await self.broadcast_callback({
+                "type": "status",
+                "status": "not_found",
+                "message": err_msg,
+            })
+            raise ValueError(err_msg)
+
+        self.device_name = device.name or "Polar H10"
+        self.device_address = device.address
+
+        # Cancela task de conexão anterior se existir
+        if self._connection_task and not self._connection_task.done():
+            self._connection_task.cancel()
+
+        # Inicia a sessão de conexão
+        self.is_running = True
+        connected_event = asyncio.Event()
+        connection_error = []
+
+        self._connection_task = asyncio.create_task(
+            self._manage_connection(device, connected_event, connection_error)
+        )
+
+        try:
+            # Aguarda até 10 segundos para a conexão ser estabelecida
+            await asyncio.wait_for(connected_event.wait(), timeout=10.0)
+            return {
+                "status": "connected",
+                "device": self.device_name,
+                "address": self.device_address,
+                "battery": self.battery_level,
+            }
+        except asyncio.TimeoutError:
+            if connection_error:
+                raise connection_error[0]
+            raise TimeoutError("Tempo esgotado ao tentar conectar com a fita Polar.")
+
+    async def _manage_connection(self, device: Any, connected_event: asyncio.Event, error_holder: list):
+        """Gerencia o ciclo de vida da conexão BleakClient ativa."""
+        def on_disconnect(client):
+            print(f"🔌 Dispositivo {self.device_name} ({self.device_address}) desconectado.")
+            self.status = "disconnected"
+            self.client = None
+            asyncio.create_task(self.broadcast_callback({
+                "type": "status",
+                "status": "disconnected",
+                "device": self.device_name,
+                "message": "Fita desconectada.",
+            }))
+
+            # Reconecta automaticamente apenas se a queda foi inesperada e auto_reconnect estiver ativo
+            if not self.user_requested_disconnect and self.auto_reconnect and self.is_running:
+                print("Tentando reconectar automaticamente em 3 segundos...")
+                asyncio.create_task(self._auto_reconnect(device))
+
+        try:
+            async with BleakClient(device, disconnected_callback=on_disconnect, timeout=12.0) as client:
+                self.client = client
+                self.status = "connected"
+
+                # Aguarda brevemente para o BlueZ resolver a tabela GATT
+                await asyncio.sleep(0.5)
+                await self._read_battery(client)
+
+                connected_event.set()
+
+                await self.broadcast_callback({
+                    "type": "status",
+                    "status": "connected",
+                    "device": self.device_name,
+                    "address": self.device_address,
+                    "battery": self.battery_level,
+                    "message": "Polar conectado com sucesso! Transmitindo dados.",
+                })
+
+                def on_notification(sender, data: bytearray):
+                    payload = parse_heart_rate_data(data)
+                    if self.battery_level is not None:
+                        payload["battery"] = self.battery_level
+                    asyncio.create_task(self.broadcast_callback(payload))
+
+                await client.start_notify(HR_MEASUREMENT_UUID, on_notification)
+
+                # Mantém o loop enquanto estiver conectado e rodando
+                while client.is_connected and self.is_running and not self.user_requested_disconnect:
+                    await asyncio.sleep(1.0)
+
+                # Desassina notificações ao encerrar normalmente
+                try:
+                    await client.stop_notify(HR_MEASUREMENT_UUID)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            print(f"Erro na conexão com Polar: {e}")
+            self.status = "error"
+            self.client = None
+            error_holder.append(e)
+            connected_event.set()
+            await self.broadcast_callback({
+                "type": "status",
+                "status": "error",
+                "message": f"Erro de conexão Bluetooth: {str(e)}",
+            })
+
+    async def _auto_reconnect(self, device: Any):
+        """Tenta restabelecer a conexão após queda involuntária."""
+        await asyncio.sleep(3.0)
+        if not self.user_requested_disconnect and self.is_running:
             try:
+                print(f"Reconectando a {self.device_name}...")
+                await self.connect_to_device(device.address)
+            except Exception as e:
+                print(f"Falha na reconexão automática: {e}")
+
+    async def disconnect(self) -> dict:
+        """Desconecta a fita e libera o adaptador Bluetooth do sistema."""
+        self.user_requested_disconnect = True
+        self.is_running = False
+
+        if self._mock_task and not self._mock_task.done():
+            self._mock_task.cancel()
+
+        if self.client and getattr(self.client, "is_connected", False):
+            try:
+                print(f"Desconectando e liberando fita {self.device_name}...")
                 await self.client.disconnect()
             except Exception as e:
-                print(f"Erro ao desconectar cliente BLE: {e}")
+                print(f"Erro ao desconectar fita: {e}")
 
-    async def _mock_loop(self):
-        """Simulador de dados para desenvolvimento do frontend sem fita ligada."""
-        base_hr = 72
-        while self.is_running:
-            base_hr += random.choice([-1, 0, 1])
-            base_hr = max(55, min(140, base_hr))
-            sim_rr = round((60.0 / base_hr) * 1000.0 + random.uniform(-15, 15), 2)
+        self.client = None
+        self.status = "disconnected"
+        self.battery_level = None
 
-            payload = {
-                "type": "data",
-                "heart_rate": base_hr,
-                "rr_intervals": [sim_rr],
-                "timestamp": time.time(),
-                "mock": True,
-            }
-            await self.broadcast_callback(payload)
-            await asyncio.sleep(1.0)
+        await self.broadcast_callback({
+            "type": "status",
+            "status": "disconnected",
+            "message": "Fita desconectada. Adaptador Bluetooth liberado.",
+        })
+
+        return {"status": "disconnected", "message": "Dispositivo desconectado e Bluetooth liberado com sucesso."}
 
     async def _read_battery(self, client: Any):
         """Tenta ler a porcentagem de bateria do dispositivo."""
@@ -112,95 +355,21 @@ class PolarBleWorker:
             print(f"Não foi possível ler nível de bateria: {e}")
             self.battery_level = None
 
-    async def _connection_loop(self):
-        """Loop principal de busca, conexão e reconexão automática."""
-        if not HAS_BLEAK:
-            error_msg = (
-                "A biblioteca 'bleak' não está instalada no ambiente Python atual. "
-                "Ative o ambiente virtual ('source venv/bin/activate') ou instale com 'pip install bleak'. "
-                "Para testar sem Bluetooth/bleak, execute com a variável de ambiente MOCK_POLAR=true."
-            )
-            print(f"❌ {error_msg}")
-            await self.broadcast_callback({
-                "type": "status",
-                "status": "error",
-                "message": error_msg,
-            })
-            return
+    async def _mock_loop(self):
+        """Simulador de dados para desenvolvimento do frontend sem fita ligada."""
+        base_hr = 72
+        while self.is_running and self.status == "connected":
+            base_hr += random.choice([-1, 0, 1])
+            base_hr = max(55, min(140, base_hr))
+            sim_rr = round((60.0 / base_hr) * 1000.0 + random.uniform(-15, 15), 2)
 
-        while self.is_running:
-            try:
-                await self.broadcast_callback({
-                    "type": "status",
-                    "status": "scanning",
-                    "message": "Buscando fita Polar H10 via Bluetooth...",
-                })
-
-                # Escaneia procurando dispositivo com 'Polar' no nome
-                device = await BleakScanner.find_device_by_filter(
-                    lambda d, adv: d.name and ("Polar" in d.name or "polar" in d.name),
-                    timeout=5.0,
-                )
-
-                if not device:
-                    await self.broadcast_callback({
-                        "type": "status",
-                        "status": "not_found",
-                        "message": "Nenhum dispositivo Polar encontrado. Tentando novamente em 3s...",
-                    })
-                    await asyncio.sleep(3.0)
-                    continue
-
-                self.device_name = device.name
-                self.device_address = device.address
-
-                await self.broadcast_callback({
-                    "type": "status",
-                    "status": "connecting",
-                    "device": self.device_name,
-                    "address": self.device_address,
-                    "message": f"Conectando a {self.device_name} ({self.device_address})...",
-                })
-
-                def on_disconnect(client):
-                    print(f"Polar {self.device_name} desconectado.")
-                    asyncio.create_task(self.broadcast_callback({
-                        "type": "status",
-                        "status": "disconnected",
-                        "message": "Fita desconectada. Reconectando...",
-                    }))
-
-                async with BleakClient(device.address, disconnected_callback=on_disconnect) as client:
-                    self.client = client
-                    await self._read_battery(client)
-
-                    await self.broadcast_callback({
-                        "type": "status",
-                        "status": "connected",
-                        "device": self.device_name,
-                        "address": self.device_address,
-                        "battery": self.battery_level,
-                        "message": "Polar conectado com sucesso! Transmitindo dados.",
-                    })
-
-                    def on_notification(sender, data: bytearray):
-                        payload = parse_heart_rate_data(data)
-                        if self.battery_level is not None:
-                            payload["battery"] = self.battery_level
-                        asyncio.create_task(self.broadcast_callback(payload))
-
-                    await client.start_notify(HR_MEASUREMENT_UUID, on_notification)
-
-                    # Mantém a conexão aberta enquanto o cliente responder
-                    while client.is_connected and self.is_running:
-                        await asyncio.sleep(1.0)
-
-            except Exception as e:
-                print(f"Erro no loop BLE: {e}")
-                await self.broadcast_callback({
-                    "type": "status",
-                    "status": "error",
-                    "message": f"Falha na conexão BLE: {str(e)}. Nova tentativa em 3s...",
-                })
-                await asyncio.sleep(3.0)
-
+            payload = {
+                "type": "data",
+                "heart_rate": base_hr,
+                "rr_intervals": [sim_rr],
+                "timestamp": time.time(),
+                "battery": 100,
+                "mock": True,
+            }
+            await self.broadcast_callback(payload)
+            await asyncio.sleep(1.0)

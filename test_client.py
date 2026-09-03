@@ -28,7 +28,11 @@ async def listen():
                     print(f"❤️ FC: {hr:3d} BPM | RR: {rr}{battery_str}{mock_str}")
 
                 elif data.get("type") == "status":
-                    print(f"ℹ️ Status: [{data.get('status')}] - {data.get('message')}")
+                    status = data.get("status")
+                    device = data.get("device")
+                    device_str = f" ({device})" if device else ""
+                    msg = data.get("message", "")
+                    print(f"ℹ️ Status: [{status}]{device_str} - {msg}")
 
     except ConnectionRefusedError:
         print("❌ Erro: Não foi possível conectar ao servidor. Certifique-se de que a API está rodando:")

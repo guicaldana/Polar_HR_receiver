@@ -1,9 +1,15 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
-from typing import Set
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from typing import Optional, Set
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from polar_worker import PolarBleWorker
+
+
+class ConnectRequest(BaseModel):
+    address: Optional[str] = None
 
 
 class ConnectionManager:
@@ -36,17 +42,25 @@ worker = PolarBleWorker(broadcast_callback=manager.broadcast)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Inicialização: inicia a busca e conexão Bluetooth em background
-    await worker.start()
+    # Conecta automaticamente apenas se AUTO_CONNECT=true for especificado
+    auto_connect = os.getenv("AUTO_CONNECT", "false").lower() in ("true", "1", "yes")
+    if auto_connect:
+        target_address = os.getenv("POLAR_ADDRESS", None)
+        print(f"⚡ AUTO_CONNECT ativo. Conectando a {target_address or 'fita Polar disponível'}...")
+        asyncio.create_task(worker.connect_to_device(address=target_address))
+    else:
+        print("ℹ️ Servidor iniciado com Bluetooth livre. Use POST /devices/connect ou faça um scan.")
+
     yield
-    # Encerramento: desconecta da fita e limpa recursos
-    await worker.stop()
+
+    # Encerramento seguro: desconecta a fita e limpa recursos
+    await worker.disconnect()
 
 
 app = FastAPI(
     title="Polar HR Receiver API",
-    description="API FastAPI para captura e streaming em tempo real de frequência cardíaca via BLE e WebSocket.",
-    version="1.0.0",
+    description="API FastAPI para busca, seleção, conexão sob demanda e streaming em tempo real da fita Polar H10 via BLE e WebSocket.",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -57,6 +71,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 
@@ -64,45 +79,92 @@ app.add_middleware(
 async def root():
     return {
         "service": "Polar HR Receiver API",
+        "version": "1.1.0",
         "endpoints": {
-            "health": "/health",
-            "websocket": "/ws/hr",
+            "scan_devices": "GET /devices/scan",
+            "connect_device": "POST /devices/connect",
+            "disconnect_device": "POST /devices/disconnect",
+            "device_status": "GET /devices/status",
+            "health": "GET /health",
+            "websocket": "WS /ws/hr",
+            "docs": "GET /docs",
         },
-        "device": worker.device_name,
-        "is_connected": worker.client.is_connected if worker.client else False,
-        "mock_mode": worker.mock_mode,
+        "device_status": worker.get_status(),
     }
+
+
+@app.get("/devices/scan")
+async def scan_devices(timeout: float = 4.0):
+    """
+    Escaneia dispositivos Bluetooth Low Energy nas proximidades.
+    Retorna lista ordenada com dispositivos Polar no topo.
+    """
+    try:
+        devices = await worker.scan_devices(timeout=timeout)
+        return {
+            "devices": devices,
+            "total": len(devices),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/devices/connect")
+async def connect_device(request: Optional[ConnectRequest] = None):
+    """
+    Inicia conexão sob demanda com um dispositivo BLE específico pelo endereço MAC.
+    Se nenhum endereço for enviado, conecta ao primeiro Polar encontrado.
+    """
+    addr = request.address if request else None
+    try:
+        result = await worker.connect_to_device(address=addr)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except TimeoutError as e:
+        raise HTTPException(status_code=504, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/devices/disconnect")
+async def disconnect_device():
+    """
+    Desconecta da fita ativa e libera o adaptador Bluetooth do Linux.
+    """
+    result = await worker.disconnect()
+    return result
+
+
+@app.get("/devices/status")
+async def device_status():
+    """
+    Retorna o status atual do dispositivo e da conexão BLE.
+    """
+    return worker.get_status()
 
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "online",
-        "active_ws_clients": len(manager.active_connections),
-        "device_name": worker.device_name,
-        "device_address": worker.device_address,
-        "battery_level": worker.battery_level,
-        "is_connected": worker.client.is_connected if worker.client else False,
-        "mock_mode": worker.mock_mode,
-    }
+    status = worker.get_status()
+    status["active_ws_clients"] = len(manager.active_connections)
+    return status
 
 
 @app.websocket("/ws/hr")
 async def websocket_heart_rate(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        # Envia o status atual assim que o cliente conecta
-        current_status = "connected" if (
-            (worker.client and worker.client.is_connected) or worker.mock_mode
-        ) else "scanning"
-
+        # Envia o estado atual assim que o cliente conecta
+        current_status = worker.get_status()
         await websocket.send_json({
             "type": "status",
-            "status": current_status,
-            "device": worker.device_name,
-            "battery": worker.battery_level,
-            "mock": worker.mock_mode,
-            "message": "Conectado ao WebSocket da API Polar.",
+            "status": current_status["status"],
+            "device": current_status["device_name"],
+            "address": current_status["device_address"],
+            "battery": current_status["battery_level"],
+            "mock": current_status["mock_mode"],
+            "message": "Conectado ao canal WebSocket da fita Polar.",
         })
 
         while True:
@@ -110,4 +172,3 @@ async def websocket_heart_rate(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-

@@ -61,9 +61,13 @@ Você verá os dados de frequência cardíaca (BPM), nível de bateria e interva
 
 ## 🌐 Endpoints da API
 
-- **`GET /`**: Informações gerais da API, modo de execução e estado da fita.
-- **`GET /health`**: Status detalhado da conexão, nível de bateria e número de clientes conectados.
-- **`WS /ws/hr`**: Canal WebSocket para streaming bidirecional em tempo real.
+- **`GET /devices/scan`**: Escaneia dispositivos BLE ao redor (retorna nome, endereço MAC e intensidade RSSI).
+- **`POST /devices/connect`**: Conecta a um dispositivo BLE específico pelo endereço MAC (ex: `{"address": "24:AC:AC:16:68:08"}`).
+- **`POST /devices/disconnect`**: Desconecta a fita ativa e **libera o adaptador Bluetooth do Linux**.
+- **`GET /devices/status`**: Estado atual detalhado da conexão BLE e do dispositivo.
+- **`GET /health`**: Verificação de saúde da API, status da fita e clientes WebSocket ativos.
+- **`WS /ws/hr`**: Canal WebSocket para streaming em tempo real (dados de FC e status).
+- **`GET /docs`**: Documentação interativa Swagger UI da FastAPI.
 
 ---
 
