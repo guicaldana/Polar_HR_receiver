@@ -53,7 +53,7 @@ MOCK_POLAR=true uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 Em outro terminal (com o ambiente virtual ativo):
 ```bash
 source venv/bin/activate
-python test_client.py
+python tests/test_client.py
 ```
 Você verá os dados de frequência cardíaca (BPM), nível de bateria e intervalos RR chegando ao vivo no console.
 
