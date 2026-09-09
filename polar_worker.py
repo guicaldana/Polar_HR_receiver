@@ -351,13 +351,9 @@ class PolarBleWorker:
             # Reconecta automaticamente apenas se a queda foi inesperada e auto_reconnect estiver ativo
             if not self.user_requested_disconnect and self.auto_reconnect and self.is_running:
                 print("Tentando reconectar automaticamente em 3 segundos...")
-                asyncio.create_task(self._auto_reconnect(device))
+                asyncio.create_task(self._auto_reconnect(self.device))
 
         try:
-            if self.device:
-                await self._force_system_disconnect(self.device)
-                await self._auto_pair_with_agent(self.device)
-            
             async with BleakClient(device, disconnected_callback=on_disconnect, timeout=12.0) as client:
                 self.client = client
                 self.status = "connected"
@@ -421,12 +417,12 @@ class PolarBleWorker:
         if not self.user_requested_disconnect and self.is_running:
             try:
                 print(f"Reconectando a {self.device_name}...")
-                await self.connect_to_device(device)
+                await self.connect_to_device(self.device)
                 # Se conectou com sucesso, _manage_connection reseta reconnect_attempts
             except Exception as e:
                 print(f"Falha na reconexão automática: {e}")
                 # Agenda nova tentativa se falhou
-                asyncio.create_task(self._auto_reconnect(device))
+                asyncio.create_task(self._auto_reconnect(self.device))
 
     async def disconnect(self) -> dict:
         """Desconecta a fita e libera o adaptador Bluetooth do sistema."""
