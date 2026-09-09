@@ -228,7 +228,7 @@ class PolarBleWorker:
 
         try:
             # Aguarda até 10 segundos para a conexão ser estabelecida
-            await asyncio.wait_for(connected_event.wait(), timeout=10.0)
+            await asyncio.wait_for(connected_event.wait(), timeout=25.0)
             return {
                 "status": "connected",
                 "device": self.device_name,
@@ -239,6 +239,111 @@ class PolarBleWorker:
             if connection_error:
                 raise connection_error[0]
             raise TimeoutError("Tempo esgotado ao tentar conectar com a fita Polar.")
+
+
+    async def _auto_pair_with_agent(self, mac: str):
+        if not mac: return
+        
+        def run_pexpect():
+            try:
+                import pexpect
+                import subprocess
+                
+                # Check se já está pareado
+                info = subprocess.getoutput(f"bluetoothctl info {mac}")
+                if "Paired: yes" in info:
+                    return True
+                    
+                print(f"🛡️ Iniciando Agente de Pareamento BLE no Servidor para {mac}...")
+                child = pexpect.spawn('bluetoothctl', encoding='utf-8', timeout=10)
+                child.expect(['#', '>'])
+                child.sendline('agent on')
+                child.expect(['#', '>'])
+                child.sendline('default-agent')
+                child.expect(['#', '>'])
+                
+                child.sendline(f'pair {mac}')
+                
+                success = False
+                while True:
+                    index = child.expect(['Accept pairing', 'Confirm passkey', 'Pairing successful', 'Failed to pair', pexpect.TIMEOUT, pexpect.EOF])
+                    if index == 0 or index == 1:
+                        child.sendline('yes')
+                    elif index == 2:
+                        success = True
+                        break
+                    elif index >= 3:
+                        break
+                        
+                if success:
+                    print(f"🛡️ Pareamento aceito com sucesso pelo Servidor!")
+                    child.sendline(f'trust {mac}')
+                    child.expect(['#', '>'], timeout=5)
+                
+                child.sendline('quit')
+                child.close()
+                return success
+            except ImportError:
+                print("⚠️ Pacote 'pexpect' não instalado. Execute: pip install pexpect")
+                return False
+            except Exception as e:
+                print(f"⚠️ Falha no agente de pareamento: {e}")
+                return False
+
+        await asyncio.to_thread(run_pexpect)
+
+
+    async def _force_system_disconnect(self, mac: str):
+        if not mac: return
+        try:
+            import subprocess
+            subprocess.run(["bluetoothctl", "disconnect", mac], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            await asyncio.sleep(1.5)
+        except Exception:
+            pass
+
+    async def _auto_pair_with_agent(self, mac: str):
+        if not mac: return
+        def run_pexpect():
+            try:
+                import pexpect
+                import subprocess
+                info = subprocess.getoutput(f"bluetoothctl info {mac}")
+                if "Paired: yes" in info:
+                    return True
+                    
+                print(f"🛡️ Iniciando Agente de Pareamento BLE no Servidor para {mac}...")
+                child = pexpect.spawn('bluetoothctl', encoding='utf-8', timeout=10)
+                child.expect(['#', '>'])
+                child.sendline('agent on')
+                child.expect(['#', '>'])
+                child.sendline('default-agent')
+                child.expect(['#', '>'])
+                child.sendline(f'pair {mac}')
+                
+                success = False
+                while True:
+                    index = child.expect(['Accept pairing', 'Confirm passkey', 'Pairing successful', 'Failed to pair', pexpect.TIMEOUT, pexpect.EOF])
+                    if index == 0 or index == 1:
+                        child.sendline('yes')
+                    elif index == 2:
+                        success = True
+                        break
+                    elif index >= 3:
+                        break
+                        
+                if success:
+                    print(f"🛡️ Pareamento aceito com sucesso pelo Servidor!")
+                    child.sendline(f'trust {mac}')
+                    child.expect(['#', '>'], timeout=5)
+                
+                child.sendline('quit')
+                child.close()
+                return success
+            except Exception as e:
+                return False
+
+        await asyncio.to_thread(run_pexpect)
 
     async def _manage_connection(self, device: Any, connected_event: asyncio.Event, error_holder: list):
         """Gerencia o ciclo de vida da conexão BleakClient ativa."""
@@ -259,6 +364,10 @@ class PolarBleWorker:
                 asyncio.create_task(self._auto_reconnect(device))
 
         try:
+            if self.device_address:
+                await self._force_system_disconnect(self.device_address)
+                await self._auto_pair_with_agent(self.device_address)
+            
             async with BleakClient(device, disconnected_callback=on_disconnect, timeout=12.0) as client:
                 self.client = client
                 self.status = "connected"
