@@ -69,7 +69,7 @@ class PolarBleWorker:
         self.user_requested_disconnect = False
         self.status = "disconnected"  # "disconnected" | "scanning" | "connecting" | "connected" | "error"
         self.device_name: Optional[str] = None
-        self.device_address: Optional[str] = None
+        self.device: Optional[str] = None
         self.battery_level: Optional[int] = None
 
         self.mock_mode = os.getenv("MOCK_POLAR", "false").lower() in ("true", "1", "yes")
@@ -90,7 +90,7 @@ class PolarBleWorker:
             "status": self.status,
             "is_connected": is_conn,
             "device_name": self.device_name,
-            "device_address": self.device_address,
+            "device": self.device,
             "battery_level": self.battery_level,
             "mock_mode": self.mock_mode,
             "auto_reconnect": self.auto_reconnect,
@@ -147,7 +147,7 @@ class PolarBleWorker:
         self.user_requested_disconnect = False
 
         # Se já estiver conectado ao mesmo dispositivo, apenas retorna sucesso
-        if self.client and getattr(self.client, "is_connected", False) and self.device_address == address:
+        if self.client and getattr(self.client, "is_connected", False) and self.device == address:
             return {"status": "connected", "message": f"Já conectado a {self.device_name}.", "device": self.device_name}
 
         # Desconecta de conexão anterior se houver
@@ -158,7 +158,7 @@ class PolarBleWorker:
             self.is_running = True
             self.status = "connected"
             self.device_name = "Polar H10 16680834 (Mock)"
-            self.device_address = address or "24:AC:AC:16:68:08"
+            self.device = address or "24:AC:AC:16:68:08"
             self.battery_level = 100
 
             if self._mock_task and not self._mock_task.done():
@@ -169,12 +169,12 @@ class PolarBleWorker:
                 "type": "status",
                 "status": "connected",
                 "device": self.device_name,
-                "address": self.device_address,
+                "address": self.device,
                 "battery": self.battery_level,
                 "mock": True,
                 "message": "Polar conectado com sucesso (Modo Mock)! Transmitindo dados.",
             })
-            return {"status": "connected", "device": self.device_name, "address": self.device_address}
+            return {"status": "connected", "device": self.device_name, "address": self.device}
 
         if not HAS_BLEAK:
             raise RuntimeError("Biblioteca 'bleak' não instalada.")
@@ -187,31 +187,21 @@ class PolarBleWorker:
             "message": f"Conectando ao dispositivo {address or 'Polar H10'}...",
         })
 
-        # Localiza o objeto BLEDevice
-        device = None
-        if address:
-            device = await BleakScanner.find_device_by_filter(
-                lambda d, adv: d.address.upper() == address.upper(),
-                timeout=6.0,
-            )
-        else:
-            device = await BleakScanner.find_device_by_filter(
+        device = address
+        if not address:
+            d = await BleakScanner.find_device_by_filter(
                 lambda d, adv: d.name and ("polar" in d.name.lower()),
                 timeout=6.0,
             )
+            if not d:
+                raise ValueError("Nenhum dispositivo Polar encontrado no scan.")
+            device = d.address
+            self.device_name = d.name or "Polar H10"
+            self.device = d.address
+        else:
+            self.device_name = "Polar H10"
+            self.device = address
 
-        if not device:
-            self.status = "disconnected"
-            err_msg = f"Dispositivo {address or 'Polar'} não encontrado ou fora de alcance."
-            await self.broadcast_callback({
-                "type": "status",
-                "status": "not_found",
-                "message": err_msg,
-            })
-            raise ValueError(err_msg)
-
-        self.device_name = device.name or "Polar H10"
-        self.device_address = device.address
 
         # Cancela task de conexão anterior se existir
         if self._connection_task and not self._connection_task.done():
@@ -232,7 +222,7 @@ class PolarBleWorker:
             return {
                 "status": "connected",
                 "device": self.device_name,
-                "address": self.device_address,
+                "address": self.device,
                 "battery": self.battery_level,
             }
         except asyncio.TimeoutError:
@@ -348,7 +338,7 @@ class PolarBleWorker:
     async def _manage_connection(self, device: Any, connected_event: asyncio.Event, error_holder: list):
         """Gerencia o ciclo de vida da conexão BleakClient ativa."""
         def on_disconnect(client):
-            print(f"🔌 Dispositivo {self.device_name} ({self.device_address}) desconectado.")
+            print(f"🔌 Dispositivo {self.device_name} ({self.device}) desconectado.")
             self.status = "disconnected"
             self.client = None
             asyncio.create_task(self.broadcast_callback({
@@ -364,9 +354,9 @@ class PolarBleWorker:
                 asyncio.create_task(self._auto_reconnect(device))
 
         try:
-            if self.device_address:
-                await self._force_system_disconnect(self.device_address)
-                await self._auto_pair_with_agent(self.device_address)
+            if self.device:
+                await self._force_system_disconnect(self.device)
+                await self._auto_pair_with_agent(self.device)
             
             async with BleakClient(device, disconnected_callback=on_disconnect, timeout=12.0) as client:
                 self.client = client
@@ -383,7 +373,7 @@ class PolarBleWorker:
                     "type": "status",
                     "status": "connected",
                     "device": self.device_name,
-                    "address": self.device_address,
+                    "address": self.device,
                     "battery": self.battery_level,
                     "message": "Polar conectado com sucesso! Transmitindo dados.",
                 })
@@ -431,7 +421,7 @@ class PolarBleWorker:
         if not self.user_requested_disconnect and self.is_running:
             try:
                 print(f"Reconectando a {self.device_name}...")
-                await self.connect_to_device(device.address)
+                await self.connect_to_device(device)
                 # Se conectou com sucesso, _manage_connection reseta reconnect_attempts
             except Exception as e:
                 print(f"Falha na reconexão automática: {e}")
