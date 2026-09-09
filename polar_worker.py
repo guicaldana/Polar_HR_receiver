@@ -292,49 +292,6 @@ class PolarBleWorker:
         except Exception:
             pass
 
-    async def _auto_pair_with_agent(self, mac: str):
-        if not mac: return
-        def run_pexpect():
-            try:
-                import pexpect
-                import subprocess
-                info = subprocess.getoutput(f"bluetoothctl info {mac}")
-                if "Paired: yes" in info:
-                    return True
-                    
-                print(f"🛡️ Iniciando Agente de Pareamento BLE no Servidor para {mac}...")
-                child = pexpect.spawn('bluetoothctl', encoding='utf-8', timeout=10)
-                child.expect(['#', '>'])
-                child.sendline('agent on')
-                child.expect(['#', '>'])
-                child.sendline('default-agent')
-                child.expect(['#', '>'])
-                child.sendline(f'pair {mac}')
-                
-                success = False
-                while True:
-                    index = child.expect(['Accept pairing', 'Confirm passkey', 'Pairing successful', 'Failed to pair', pexpect.TIMEOUT, pexpect.EOF])
-                    if index == 0 or index == 1:
-                        child.sendline('yes')
-                    elif index == 2:
-                        success = True
-                        break
-                    elif index >= 3:
-                        break
-                        
-                if success:
-                    print(f"🛡️ Pareamento aceito com sucesso pelo Servidor!")
-                    child.sendline(f'trust {mac}')
-                    child.expect(['#', '>'], timeout=5)
-                
-                child.sendline('quit')
-                child.close()
-                return success
-            except Exception as e:
-                return False
-
-        await asyncio.to_thread(run_pexpect)
-
     async def _manage_connection(self, device: Any, connected_event: asyncio.Event, error_holder: list):
         """Gerencia o ciclo de vida da conexão BleakClient ativa."""
         def on_disconnect(client):
