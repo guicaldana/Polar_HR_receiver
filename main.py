@@ -161,7 +161,7 @@ async def websocket_heart_rate(websocket: WebSocket):
             "type": "status",
             "status": current_status["status"],
             "device": current_status["device_name"],
-            "address": current_status["device_address"],
+            "address": current_status.get("device_address", current_status.get("device")),
             "battery": current_status["battery_level"],
             "mock": current_status["mock_mode"],
             "message": "Conectado ao canal WebSocket da fita Polar.",
