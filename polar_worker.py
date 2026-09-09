@@ -8,7 +8,7 @@ from typing import Any, Callable, List, Optional
 try:
     from bleak import BleakScanner, BleakClient
     HAS_BLEAK = True
-except ImportError:
+except ImportError as e:
     BleakScanner = None
     BleakClient = None
     HAS_BLEAK = False
@@ -273,12 +273,12 @@ class PolarBleWorker:
                 child.sendline('quit')
                 child.close()
                 return success
-            except ImportError:
+            except ImportError as e:
                 print("⚠️ Pacote 'pexpect' não instalado. Execute: pip install pexpect")
-                return False
+                print(f"ERRO NO AGENTE: {e}"); return False
             except Exception as e:
                 print(f"⚠️ Falha no agente de pareamento: {e}")
-                return False
+                print(f"ERRO NO AGENTE: {e}"); return False
 
         await asyncio.to_thread(run_pexpect)
 
@@ -311,6 +311,13 @@ class PolarBleWorker:
                 asyncio.create_task(self._auto_reconnect(self.device))
 
         try:
+            if isinstance(device, str):
+                await self._force_system_disconnect(device)
+                await self._auto_pair_with_agent(device)
+            elif hasattr(device, 'address'):
+                await self._force_system_disconnect(device.address)
+                await self._auto_pair_with_agent(device.address)
+                
             async with BleakClient(device, disconnected_callback=on_disconnect, timeout=12.0) as client:
                 self.client = client
                 self.status = "connected"
