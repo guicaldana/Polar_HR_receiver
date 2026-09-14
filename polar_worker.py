@@ -1,5 +1,6 @@
 import asyncio
 import os
+import platform
 import random
 import struct
 import time
@@ -219,6 +220,8 @@ class PolarBleWorker:
         try:
             # Aguarda até 10 segundos para a conexão ser estabelecida
             await asyncio.wait_for(connected_event.wait(), timeout=25.0)
+            if connection_error:
+                raise connection_error[0]
             return {
                 "status": "connected",
                 "device": self.device_name,
@@ -233,6 +236,8 @@ class PolarBleWorker:
 
     async def _auto_pair_with_agent(self, mac: str):
         if not mac: return
+        if platform.system() == "Windows":
+            return
         
         def run_pexpect():
             try:
@@ -285,6 +290,8 @@ class PolarBleWorker:
 
     async def _force_system_disconnect(self, mac: str):
         if not mac: return
+        if platform.system() == "Windows":
+            return
         try:
             import subprocess
             subprocess.run(["bluetoothctl", "disconnect", mac], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -327,6 +334,14 @@ class PolarBleWorker:
                 # await self._read_battery(client)
 
                 self.reconnect_attempts = 0
+
+                def on_notification(sender, data: bytearray):
+                    payload = parse_heart_rate_data(data)
+                    if self.battery_level is not None:
+                        payload["battery"] = self.battery_level
+                    asyncio.create_task(self.broadcast_callback(payload))
+
+                await client.start_notify(HR_MEASUREMENT_UUID, on_notification)
                 connected_event.set()
 
                 await self.broadcast_callback({
@@ -337,14 +352,6 @@ class PolarBleWorker:
                     "battery": self.battery_level,
                     "message": "Polar conectado com sucesso! Transmitindo dados.",
                 })
-
-                def on_notification(sender, data: bytearray):
-                    payload = parse_heart_rate_data(data)
-                    if self.battery_level is not None:
-                        payload["battery"] = self.battery_level
-                    asyncio.create_task(self.broadcast_callback(payload))
-
-                await client.start_notify(HR_MEASUREMENT_UUID, on_notification)
 
                 # Mantém o loop enquanto estiver conectado e rodando
                 while client.is_connected and self.is_running and not self.user_requested_disconnect:
