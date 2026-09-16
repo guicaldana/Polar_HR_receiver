@@ -38,6 +38,49 @@ source venv/bin/activate
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+### Windows (PowerShell)
+
+Com o Bluetooth do Windows ligado, vista a cinta e umedeça os eletrodos. No PowerShell, a partir da pasta do projeto:
+
+```powershell
+cd "C:\Users\SEU_USUARIO\Documents\Repositories\Polar_HR_receiver"
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Mantenha esse terminal aberto. Em outro PowerShell, procure a Polar:
+
+```powershell
+cd "C:\Users\SEU_USUARIO\Documents\Repositories\Polar_HR_receiver"
+Invoke-RestMethod "http://localhost:8000/devices/scan?timeout=15"
+```
+
+Copie o endereço retornado no campo `address` e conecte o dispositivo:
+
+```powershell
+$body = @{ address = "ENDERECO_RETORNADO_NO_SCAN" } | ConvertTo-Json
+
+Invoke-RestMethod -Method Post `
+  -Uri http://localhost:8000/devices/connect `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+Confira o estado da conexão:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/health
+```
+
+Em um terceiro PowerShell, teste o WebSocket:
+
+```powershell
+cd "C:\Users\SEU_USUARIO\Documents\Repositories\Polar_HR_receiver"
+.\.venv\Scripts\python.exe tests\test_client.py
+```
+
+Se a Polar já estiver no peito, não é necessário adicioná-la manualmente nas configurações do Windows. O `Bleak` usa o Bluetooth do próprio Windows. Feche aplicativos no celular que estejam conectados à cinta.
+
 ### 3. Modo Simulação (Mock) — Sem precisar da fita física
 Ideal para desenvolver a interface no Next.js quando a fita estiver desligada, sem bateria ou sem receptor Bluetooth no computador de desenvolvimento:
 ```bash
@@ -45,6 +88,19 @@ source venv/bin/activate
 MOCK_POLAR=true uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 > **Nota:** Em modo mock (`MOCK_POLAR=true`), o servidor roda mesmo sem a biblioteca `bleak` ou adaptadores Bluetooth disponíveis.
+
+No Windows, use estas variáveis no PowerShell:
+
+```powershell
+$env:MOCK_POLAR = "true"
+.\.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Para voltar ao modo Bluetooth real na mesma sessão:
+
+```powershell
+Remove-Item Env:MOCK_POLAR -ErrorAction SilentlyContinue
+```
 
 ---
 
@@ -56,6 +112,12 @@ source venv/bin/activate
 python tests/test_client.py
 ```
 Você verá os dados de frequência cardíaca (BPM), nível de bateria e intervalos RR chegando ao vivo no console.
+
+No Windows, execute em outro PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe tests\test_client.py
+```
 
 ---
 
